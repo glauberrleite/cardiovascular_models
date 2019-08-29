@@ -28,16 +28,20 @@ R_p = 0.05; % Resistance of Thoratec® Bladder
 C_d = 4; % Compliance of pneumatic drive line
 R_d = 0.01; % Resistance of pneumatic drive line
 alpha_PVAD = 0.15; % PVAD parameter (s/mL)
+C_p = 2; % Compliance of Thoratec® Bladder
+Vd_vad = 107; % Reference Volume
 
-C_p = 2; % Compliance of Thoratec® Bladder % TODO
-Vd_vad = 107; % TODO
-P_d = 0; % TODO
+P_e = 180; % Ejection pressure
+P_f = 0; % Filling pressure
 
-E_max = 3;
+E_max = .8;
 E_min = 0.05;
 HeartRate = 60;
 tc = 60/HeartRate; % Cardiac cycle interval
 t_max = 0.2 + 0.1555*tc;
+
+ejection_time = tc / 2; % Pe will remain constant for this fixed period
+ejection_delay = 0.25 * tc; % The amount of delay after E(t) is triggered to start ejection
 
 T_s = 0.0001;
 t = 0;
@@ -230,7 +234,6 @@ end
 %plot(data.t(1:end-1),data.x.zecg,'b', data.t(1:end-1),max(data.x.zecg)*R_dtct,'k');
 r_wave_times = find(max(data.x.zecg)*R_dtct) * T_s;
 
-
 %% Model functions and state space matrices
 E_n = @(t_n) 1.55 ...
     * (((t_n/0.7)^1.9)/(1 + (t_n/0.7)^1.9)) ...
@@ -244,7 +247,7 @@ E = @(t) (t > r_wave_times(1))*(E_max - E_min) ...
 
 P_ve = @(E_t, V_ve) E_t * (V_ve - V_0);
 
-% x = [V_ve, P_ae, Q_a, P_ao, P_s, Q_i, Q_o, P_ex, V_c]
+% x = [V_ve, P_ae, Q_a, P_ao, P_s, Q_i, Q_o, P_d, V_c]
 A = @(E_t, D_m, D_a, beta_i, beta_o, gamma, omega_i_t, omega_o_t) [-(D_m/R_m + D_a/R_a) * E_t, D_m/R_m, 0, D_a/R_a, 0, -1, 0, 0, 0;
     (D_m * E_t)/(R_m * C_ae), -(C_ae^-1) * (1/R_s + D_m/R_m), 0, 0, (R_s * C_ae)^-1, 0, 0, 0, 0;
     0, 0, -R_c/L_s, L_s^-1, -L_s^-1, 0, 0, 0, 0;
@@ -255,18 +258,15 @@ A = @(E_t, D_m, D_a, beta_i, beta_o, gamma, omega_i_t, omega_o_t) [-(D_m/R_m + D
     0, 0, 0, 0, 0, 0, 0, -(R_d * C_d)^-1, 0;
     0, 0, 0, 0, 0, 1, -1, 0, 0];
 
-p = @(E_t, D_m, D_a, beta_i, beta_o, gamma) [(D_m/R_m + D_a/R_a)*E_t*V_0;
+p = @(E_t, D_m, D_a, beta_i, beta_o, gamma, P_x) [(D_m/R_m + D_a/R_a)*E_t*V_0;
     -(D_m*E_t*V_0)/(R_m*C_ae);
     0;
     -(D_a*E_t*V_0)/(R_a*C_ao);
     0;
     ((beta_i - gamma)/C_p) * Vd_vad - beta_i * E_t * V_0;
     ((beta_o - gamma)/C_p) * Vd_vad;
-    P_d / (R_d * C_d);
+    P_x / (R_d * C_d);
     0];
-
-%% Preparing Control Variable
-omega = @(t) 12000 + 100 * t;
 
 %% Preparing main simulation
 data.x.V_ve = zeros(N, 1);
@@ -276,12 +276,13 @@ data.x.P_ao = zeros(N, 1);
 data.x.P_s = zeros(N, 1);
 data.x.Q_i = zeros(N, 1);
 data.x.Q_o = zeros(N, 1);
-data.x.P_ex = zeros(N, 1);
+data.x.P_d = zeros(N, 1);
 data.x.V_c = zeros(N, 1);
 data.P_ve = zeros(N, 1);
 data.E = zeros(N, 1);
 data.omega_i = zeros(N, 1);
 data.omega_o = zeros(N, 1);
+data.P_x = zeros(N, 1);
 
 % Initial conditions
 data.x.V_ve(1) = 140;
@@ -297,10 +298,26 @@ D_m = 1;
 D_i = 1;
 D_o = 1;
 
+ejection_counter = 0;
+
 %% Running main simulation
 n = 1;
 t = 0;
 while t < t_end
+    
+    % Calculating PVAD pressures
+    if ejection_counter > 0
+        P_x = P_e;
+        ejection_counter = ejection_counter - 1;
+    elseif ismember(n, (r_wave_times / T_s) + (ejection_delay / T_s))
+        P_x = P_e;
+        ejection_counter = ejection_time / T_s;
+    else 
+        P_x = P_f;
+    end
+    
+    P_air = data.x.P_d(n) + alpha_PVAD * (data.x.Q_i(n) - data.x.Q_o(n));
+    P_c = P_air;
     
     % Diod values
     if (data.x.P_ae(n) > data.P_ve(n))
@@ -313,20 +330,32 @@ while t < t_end
         D_m = 0;
         D_a = 0;
     end
+    
+    if (data.P_ve(n) > P_c)
+        D_i = 1;
+        D_o = 0.03;
+    elseif (P_c > data.x.P_ao(n))
+        D_i = 0.08;
+        D_o = 1;
+    else
+        D_i = 0.08;
+        D_o = 0.03;
+    end
         
     % State vector
-    x = [data.x.V_ve(n); data.x.P_ae(n); data.x.Q_a(n); data.x.P_ao(n); data.x.P_s(n); data.x.Q_i(n); data.x.Q_o(n); data.x.P_ex(n); data.x.V_c(n)];
+    x = [data.x.V_ve(n); data.x.P_ae(n); data.x.Q_a(n); data.x.P_ao(n); data.x.P_s(n); data.x.Q_i(n); data.x.Q_o(n); data.x.P_d(n); data.x.V_c(n)];
     
-    % Updating values
+    % Updating PVAD values
     beta_i = D_i/(L_i + D_i * L_p);
     beta_o = D_o/(L_o + D_o * L_p);
     gamma = beta_i * L_p * beta_o;
-    omega_i_t = R_i * (L_i + D_i * L_p);
+    R_i_new = R_i + exp(-0.25*data.x.V_ve(n));
+    omega_i_t = R_i_new * (L_i + D_i * L_p);
     omega_o_t = R_o(data.x.Q_o(n)) * (L_o + D_o * L_p);
         
     % RK4 integration
     A_i = A(data.E(n), D_m, D_a, beta_i, beta_o, gamma, omega_i_t, omega_o_t);
-    p_i = p(data.E(n), D_m, D_a, beta_i, beta_o, gamma);
+    p_i = p(data.E(n), D_m, D_a, beta_i, beta_o, gamma, P_x);
     
     dx =  A_i * x +  p_i;
     kx1 = T_s * dx;
@@ -357,9 +386,10 @@ while t < t_end
     data.x.P_s(n) = xf(5);
     data.x.Q_i(n) = xf(6);
     data.x.Q_o(n) = xf(7);
-    data.x.P_ex(n) = xf(8);
+    data.x.P_d(n) = xf(8);
     data.x.V_c(n) = xf(9);
     
+    data.P_x(n) = P_x;    
     data.E(n) = E(t);
     data.omega_i(n) = omega_i_t;
     data.omega_o(n) = omega_o_t;
@@ -375,35 +405,42 @@ plot(data.t, data.x.P_ao, 'k', data.t, data.P_ve, ':k', data.t, data.x.P_ae, '--
 title('Results - Glauber R. Leite');
 legend('AoP', 'LVP', 'LAP');
 ylabel('Pressures (mmHg)');
-axis([0, 3, -5, 150]);
+%axis([0, 3, -5, 150]);
 grid on;
 
 subplot(3,1,2);
 plot(data.t, data.x.Q_a, 'k');
 ylabel('Aortic Flow (ml/s)');
-axis([0, 3, -50, 700]);
+%axis([0, 3, -50, 700]);
 grid on;
 
 subplot(3,1,3);
 plot(data.t, data.x.V_ve, 'k');
 ylabel('LVV (ml)');
 xlabel('time (s)');
-axis([0, 3, 50, 160]);
+%axis([0, 3, 50, 160]);
 grid on;
 
 figure(2);
-subplot(2,1,1);
+subplot(3,1,1);
 plot(data.t(1:end-1),data.x.zecg,'b', data.t(1:end-1),max(data.x.zecg)*R_dtct,'k');
 title('MaMeMi performance');
 legend('ECG', 'MaMeMi');
 axis([0, 3, -0.03, 0.06]);
 grid on;
  
-subplot(2,1,2);
-plot(data.t(1:end-1),data.E(1:end-1),'b', data.t(1:end-1),40*max(data.x.zecg)*R_dtct,'k');
+subplot(3,1,2);
+plot(data.t(1:end-1),data.E(1:end-1),'b', data.t(1:end-1),E_max * 20*max(data.x.zecg)*R_dtct,'k');
 title('Elastance');
 legend('E(t)', 'MaMeMi');
-axis([0, 3, -0.2, 2.2]);
+axis([0, 3, -0.2, E_max + 0.2]);
 grid on;
  
+subplot(3,1,3);
+plot(data.t(1:end-1),data.P_x(1:end-1),'b', data.t(1:end-1), P_e * 20*max(data.x.zecg)*R_dtct,'k');
+title('Pneumatic Signal');
+legend('P_x', 'MaMeMi');
+axis([0, 3, P_f - 20, P_e + 20]);
+grid on;
+
 %figure(3);
