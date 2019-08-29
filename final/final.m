@@ -231,7 +231,6 @@ for i = 1:N-1
     end
 end
 
-%plot(data.t(1:end-1),data.x.zecg,'b', data.t(1:end-1),max(data.x.zecg)*R_dtct,'k');
 r_wave_times = find(max(data.x.zecg)*R_dtct) * T_s;
 
 %% Model functions and state space matrices
@@ -283,6 +282,7 @@ data.E = zeros(N, 1);
 data.omega_i = zeros(N, 1);
 data.omega_o = zeros(N, 1);
 data.P_x = zeros(N, 1);
+data.P_c = zeros(N, 1);
 
 % Initial conditions
 data.x.V_ve(1) = 140;
@@ -303,6 +303,8 @@ ejection_counter = 0;
 %% Running main simulation
 n = 1;
 t = 0;
+d_Q_i = 0;
+d_Q_o = 0;
 while t < t_end
     
     % Calculating PVAD pressures
@@ -317,7 +319,7 @@ while t < t_end
     end
     
     P_air = data.x.P_d(n) + alpha_PVAD * (data.x.Q_i(n) - data.x.Q_o(n));
-    P_c = P_air;
+    P_c = P_air + R_p * (data.x.Q_i(n) - data.x.Q_o(n)) + L_p * (d_Q_i - d_Q_o);
     
     % Diod values
     if (data.x.P_ae(n) > data.P_ve(n))
@@ -350,9 +352,9 @@ while t < t_end
     beta_o = D_o/(L_o + D_o * L_p);
     gamma = beta_i * L_p * beta_o;
     R_i_new = R_i + exp(-0.25*data.x.V_ve(n));
-    omega_i_t = R_i_new * (L_i + D_i * L_p);
-    omega_o_t = R_o(data.x.Q_o(n)) * (L_o + D_o * L_p);
-        
+    omega_i_t = R_i_new / (L_i + D_i * L_p);
+    omega_o_t = R_o(data.x.Q_o(n)) / (L_o + D_o * L_p);
+
     % RK4 integration
     A_i = A(data.E(n), D_m, D_a, beta_i, beta_o, gamma, omega_i_t, omega_o_t);
     p_i = p(data.E(n), D_m, D_a, beta_i, beta_o, gamma, P_x);
@@ -372,7 +374,12 @@ while t < t_end
     dx = A_i * x1 +  p_i;
     kx4 = T_s * dx;
     
-    xf = x + (kx1 + 2 * kx2 + 2 * kx3 + kx4)/6;
+    dx = (kx1 + 2 * kx2 + 2 * kx3 + kx4)/6;
+    xf = x + dx;
+    
+    % Changing d_Q_i and d_Q_o for next P_c
+    d_Q_i = dx(6);
+    d_Q_o = dx(7);
     
     % Iterating
     t = t + T_s;
@@ -390,6 +397,7 @@ while t < t_end
     data.x.V_c(n) = xf(9);
     
     data.P_x(n) = P_x;    
+    data.P_c(n) = P_c;    
     data.E(n) = E(t);
     data.omega_i(n) = omega_i_t;
     data.omega_o(n) = omega_o_t;
